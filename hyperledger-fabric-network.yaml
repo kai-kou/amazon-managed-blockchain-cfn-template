@@ -1,0 +1,802 @@
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+  NetworkName:
+    Type: String
+  NetworkDescription:
+    Type: String
+    Default: ''
+  NetworkFramework:
+    Type: String
+    Default: HYPERLEDGER_FABRIC
+    AllowedValues: [HYPERLEDGER_FABRIC]
+  NetworkEdition:
+    Type: String
+    Default: STARTER
+    AllowedValues: [STARTER, STANDARD]
+    ConstraintDescription: must be a edition supported by Amazon Managed Blockchain.
+  FrameworkVersion:
+    Description: The version of the blockchain framework that the network uses.
+    Type: String
+    Default: 1.2
+    AllowedValues: [1.2]
+    ConstraintDescription: must be a version supported by Amazon Managed Blockchain.
+  AdminUsername:
+    Type: String
+  AdminPassword:
+    Type: String
+  OrgName:
+    Type: String
+    Default: org1
+  ThresholdPercentage:
+    Type: String
+    Default: 50
+  ProposalDurationInHours:
+    Type: String
+    Default: 24
+  ThresholdComparator:
+    Type: String
+    Default: GREATER_THAN
+    AllowedValues: [GREATER_THAN]
+  PeerNodeAvailabilityZone:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-1a
+  PeerNodeInstanceType:
+    Description: EC2 instance type to use for the client hardware
+    Type: String
+    Default: bc.t3.small
+    AllowedValues: [bc.t3.small, bc.t3.medium, bc.t3.large, bc.t3.xlarge,
+                    bc.m5.large, bc.m5.xlarge, bc.m5.2xlarge, bc.m5.4xlarge,
+                    bc.c5.large, bc.c5.xlarge, bc.c5.2xlarge, bc.c5.4xlarge]
+    ConstraintDescription: must be a valid EC2 instance type.
+  Boto3LambdaLayerArn:
+    Type: String
+  EC2KeyPairName:
+    Description:  Name of an existing EC2 key pair to enable SSH access to the instance.
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+  ClientInstanceType:
+    Description: EC2 instance type to use for the client hardware
+    Type: String
+    Default: t3.small
+    AllowedValues: [t2.nano, t2.micro, t2.small, t2.medium, t2.large, t2.xlarge, t2.2xlarge,
+                    t3.nano, t3.micro, t3.small, t3.medium, t3.large, t3.xlarge, t3.2xlarge,
+                    m4.large, m4.xlarge, m4.2xlarge, m4.4xlarge, m4.10xlarge,
+                    m5.large, m5.xlarge, m5.2xlarge, m5.4xlarge,
+                    c5.large, c5.xlarge, c5.2xlarge, c5.4xlarge, c5.9xlarge,
+                    g3.8xlarge,
+                    r5.large, r5.xlarge, r5.2xlarge, r5.4xlarge, r3.12xlarge,
+                    i3.xlarge, i3.2xlarge, i3.4xlarge, i3.8xlarge,
+                    d2.xlarge, d2.2xlarge, d2.4xlarge, d2.8xlarge]
+    ConstraintDescription: must be a valid EC2 instance type.
+  InstanceProfileName:
+    Description: (Optional) The name of the Instance Profile to attach to the EC2 instance.
+    Type: String
+    Default: ''
+  ClientSSHCidrIp:
+    Type: String
+    Default: '0.0.0.0/0'
+
+Conditions:
+  HasInstanceProfileName:
+    !Not [ !Equals [ !Ref 'InstanceProfileName', '' ] ]
+
+Mappings:
+  AWSRegionToAMI:
+    us-east-1:
+      HVM64: ami-0080e4c5bc078760e
+  AWSRegionToCertificateUrl:
+    us-east-1:
+      TLS: https://s3.amazonaws.com/us-east-1.managedblockchain/etc/managedblockchain-tls-chain.pem
+  FrameworkVersionToPackageVersion:
+    "1.2":
+      DOCKERCOMPOSE: "1.20.0"
+      GO: "1.10.3"
+      FABRICTOOLS: "1.2.0"
+      FABRICCA: "release-1.2"
+
+Resources:
+  CreateBlockchainNetwork:
+    Type: Custom::CustomResource
+    Properties:
+      ServiceToken: !GetAtt CreateBlockchainNetworkFunction.Arn
+      NetworkName: !Ref NetworkName
+      NetworkDescription: !Ref NetworkDescription
+      NetworkFramework: !Ref NetworkFramework
+      FrameworkVersion: !Ref FrameworkVersion
+      NetworkEdition: !Ref NetworkEdition
+      AdminUsername: !Ref AdminUsername
+      AdminPassword: !Ref AdminPassword
+      OrgName: !Ref OrgName
+      ThresholdPercentage: !Ref ThresholdPercentage
+      ProposalDurationInHours: !Ref ProposalDurationInHours
+      ThresholdComparator: !Ref ThresholdComparator
+
+  BlockchainNetwork:
+    Type: Custom::CustomResource
+    Properties:
+      ServiceToken: !GetAtt BlockchainNetworkFunction.Arn
+      NetworkId: !GetAtt CreateBlockchainNetwork.NetworkId
+    DependsOn: CreateBlockchainNetwork
+
+  BlockchainMember:
+    Type: Custom::CustomResource
+    Properties:
+      ServiceToken: !GetAtt BlockchainMemberFunction.Arn
+      NetworkId: !GetAtt BlockchainNetwork.Network.Id
+      MemberId: !GetAtt CreateBlockchainNetwork.MemberId
+    DependsOn: BlockchainNetwork
+
+  CreateBlockchainPeerNode:
+    Type: Custom::CustomResource
+    Properties:
+      ServiceToken: !GetAtt CreateBlockchainPeerNodeFunction.Arn
+      NetworkId: !GetAtt BlockchainNetwork.Network.Id
+      MemberId: !GetAtt BlockchainMember.Member.Id
+      InstanceType: !Ref PeerNodeInstanceType
+      AvailabilityZone: !Ref PeerNodeAvailabilityZone
+    DependsOn: BlockchainMember
+
+  BlockchainPeerNode:
+    Type: Custom::CustomResource
+    Properties:
+      ServiceToken: !GetAtt BlockchainPeerNodeFunction.Arn
+      NetworkId: !GetAtt BlockchainNetwork.Network.Id
+      MemberId: !GetAtt BlockchainMember.Member.Id
+      NodeId: !GetAtt CreateBlockchainPeerNode.NodeId
+    DependsOn: CreateBlockchainPeerNode
+
+  BlockchainNetworkSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join
+        - "-"
+        - - !Ref NetworkName
+          - "SecurityGroup"
+      GroupDescription: "Managed Blockchain Network SecurityGroup"
+      VpcId:
+        Ref: VpcId
+      SecurityGroupEgress:
+        -
+          CidrIp: "0.0.0.0/0"
+          IpProtocol: "-1"
+      SecurityGroupIngress:
+        -
+          CidrIp: "0.0.0.0/0"
+          Description: !Join
+            - "-"
+            - - !Ref NetworkName
+              - "CA, Orderer Port"
+          IpProtocol: "tcp"
+          FromPort: !Select
+            - 1
+            - !Split
+              - ":"
+              - !GetAtt BlockchainNetwork.Network.FrameworkAttributes.Fabric.OrderingServiceEndpoint
+          ToPort: !Select
+            - 1
+            - !Split
+              - ":"
+              - !GetAtt BlockchainMember.Member.FrameworkAttributes.Fabric.CaEndpoint
+        -
+          CidrIp: "0.0.0.0/0"
+          Description: !Join
+            - "-"
+            - - !Ref NetworkName
+              - "Peer Port"
+          IpProtocol: "tcp"
+          FromPort: !Select
+            - 1
+            - !Split
+              - ":"
+              - !GetAtt BlockchainPeerNode.Node.FrameworkAttributes.Fabric.PeerEndpoint
+          ToPort: !Select
+            - 1
+            - !Split
+              - ":"
+              - !GetAtt BlockchainPeerNode.Node.FrameworkAttributes.Fabric.PeerEndpoint
+      Tags:
+        -
+          Key: "Name"
+          Value: !Join
+            - "-"
+            - - !Ref NetworkName
+              - "SecurityGroup"
+    DependsOn: BlockchainPeerNode
+
+  BlockchainClientSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join
+        - "-"
+        - - !Ref NetworkName
+          - "Client"
+          - "SecurityGroup"
+      GroupDescription: "Managed Blockchain Client SecurityGroup"
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        -
+          CidrIp: "0.0.0.0/0"
+          IpProtocol: "-1"
+      SecurityGroupIngress:
+        -
+          CidrIp: !Ref ClientSSHCidrIp
+          Description: !Join
+            - "-"
+            - - !Ref NetworkName
+              - "Client SSH Port"
+          IpProtocol: "tcp"
+          FromPort: 22
+          ToPort: 22
+      Tags:
+        -
+          Key: "Name"
+          Value: !Join
+            - "-"
+            - - !Ref NetworkName
+              - "Client"
+              - "SecurityGroup"
+
+  BlockchainEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !GetAtt BlockchainNetwork.Network.VpcEndpointServiceName
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: True
+      SubnetIds:
+        - !Ref SubnetId
+      SecurityGroupIds:
+        - !GetAtt BlockchainNetworkSecurityGroup.GroupId
+      Tags:
+        -
+          Key: "Name"
+          Value: !Join
+            - "-"
+            - - !Ref NetworkName
+              - "VPCEndpoint"
+    DependsOn: BlockchainNetworkSecurityGroup
+
+  # https://github.com/awslabs/amazon-managed-blockchain-client-templates/blob/master/templates/fabric-ec2-client.template.yaml#L2
+  BlockchainClient:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref ClientInstanceType
+      KeyName: !Ref EC2KeyPairName
+      ImageId: !FindInMap [ AWSRegionToAMI, !Ref "AWS::Region", HVM64 ]
+      IamInstanceProfile: !If [HasInstanceProfileName, !Ref "InstanceProfileName", !Ref "AWS::NoValue"]
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          GroupSet:
+            - !GetAtt BlockchainClientSecurityGroup.GroupId
+          SubnetId: !Ref SubnetId
+      Tags:
+        - Key: 'Name'
+          Value: !Join
+            - "-"
+            - - !Ref NetworkName
+              - "Client"
+      UserData:
+        Fn::Base64:
+          Fn::Sub:
+            - |
+              #!/bin/bash
+              set -e
+              set -x
+              cd /home/ec2-user
+              yum update -y
+              yum install -y docker
+              service docker start
+              usermod -a -G docker ec2-user
+              curl -L https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-`uname -s`-`uname -m` -o /usr/local/bin/docker-compose
+              chmod a+x /usr/local/bin/docker-compose
+              yum install libtool -y
+              wget https://dl.google.com/go/go${GO_VERSION}.linux-amd64.tar.gz
+              tar -xzf go${GO_VERSION}.linux-amd64.tar.gz
+              mv go /usr/local
+              yum install libtool-ltdl-devel -y
+              yum install git -y
+              echo 'export GOROOT=/usr/local/go
+              export GOPATH=/home/ec2-user/go
+              export PATH=$GOROOT/bin:$PATH' >> /home/ec2-user/.bash_profile
+              source /home/ec2-user/.bash_profile
+              # Clone Fabric-ca github repository
+              go get -u github.com/hyperledger/fabric-ca/cmd/...
+              cd /home/ec2-user/go/src/github.com/hyperledger/fabric-ca
+              git fetch
+              git checkout ${FABRIC_CA_VERSION}
+              make fabric-ca-client
+              cd /home/ec2-user
+              echo 'export PATH=$PATH:/home/ec2-user/go/src/github.com/hyperledger/fabric-ca/bin' >> /home/ec2-user/.bash_profile
+              source /home/ec2-user/.bash_profile
+              # Setup Fabric-ca client profile
+              mkdir -p /home/ec2-user/.fabric-ca-client
+              touch /home/ec2-user/.fabric-ca-client/fabric-ca-client-config.yaml
+              echo '
+              #############################################################################
+              # Client Configuration
+              #############################################################################
+              # URL of the Fabric-ca-server (default: http://localhost:7054)
+              url: https://${FABRIC_CA_ENDPOINT}
+              # Membership Service Provider (MSP) directory
+              # This is useful when the client is used to enroll a peer or orderer, so
+              # that the enrollment artifacts are stored in the format expected by MSP.
+              mspdir: /home/ec2-user/admin-msp
+              #############################################################################
+              #    TLS section for secure socket connection
+              #
+              #  certfiles - PEM-encoded list of trusted root certificate files
+              #############################################################################
+              tls:
+                # TLS section for secure socket connection
+                certfiles: /home/ec2-user/${FABRIC_CA_FILE}
+              ' > /home/ec2-user/.fabric-ca-client/fabric-ca-client-config.yaml
+              chmod 666 /home/ec2-user/.fabric-ca-client/fabric-ca-client-config.yaml
+              # Download TLS cert
+              wget ${TLS_CERT_URL}
+              git clone https://github.com/hyperledger/fabric-samples.git
+              echo 'export ORDERER=${ORDERING_SERVICE_ENDPOINT}' >> /home/ec2-user/.bash_profile
+              echo 'export FABRIC_CA_FILE=${FABRIC_CA_FILE}' >> /home/ec2-user/.bash_profile
+              echo 'version: '"'2'"'
+              services:
+               cli:
+                 container_name: cli
+                 image: hyperledger/fabric-tools:${FABRIC_TOOLS_VERSION}
+                 tty: true
+                 environment:
+                   - GOPATH=/opt/gopath
+                   - CORE_VM_ENDPOINT=unix:///host/var/run/docker.sock
+                   - CORE_LOGGING_LEVEL=info # Set logging level to debug for more verbose logging
+                   - CORE_PEER_ID=cli
+                   - CORE_CHAINCODE_KEEPALIVE=10
+                   - CORE_PEER_LOCALMSPID=${MEMBER_ID}
+                   - CORE_PEER_MSPCONFIGPATH=/opt/home/admin-msp
+                   - CORE_PEER_ADDRESS=${PEER_NODE_ENDPOINT}
+                   - CORE_PEER_TLS_ROOTCERT_FILE=/opt/home/${FABRIC_CA_FILE}
+                   - CORE_PEER_TLS_ENABLED=true
+                   - MSP_PATH=/opt/home/admin-msp
+                   - MSP=${MEMBER_ID}
+                   - ORDERER=${ORDERING_SERVICE_ENDPOINT}
+                   - PEER=${PEER_NODE_ENDPOINT}
+                 working_dir: /opt/home
+                 command: /bin/bash
+                 volumes:
+                   - /var/run/:/host/var/run/
+                   - /home/ec2-user/fabric-samples/chaincode:/opt/gopath/src/github.com/
+                   - /home/ec2-user:/opt/home' > docker-compose-cli.yaml
+              newgrp `id -gn`
+              /usr/local/bin/docker-compose -f docker-compose-cli.yaml up -d
+              sleep 5m
+              # enroll
+              fabric-ca-client enroll -u https://${ADMIN_USERNAME}:${ADMIN_PASSWORD}@${FABRIC_CA_ENDPOINT} --tls.certfiles /home/ec2-user/${FABRIC_CA_FILE} -M /home/ec2-user/admin-msp
+              cp -r /home/ec2-user/admin-msp/signcerts /home/ec2-user/admin-msp/admincerts
+              echo '
+              Organizations:
+                  - &Org1
+                      Name: ${MEMBER_ID}
+                      ID: ${MEMBER_ID}
+                      MSPDir: /opt/home/admin-msp
+                      AnchorPeers:
+                          - Host:
+                            Port:
+              Application: &ApplicationDefaults
+                  Organizations:
+              Profiles:
+                  OneOrgChannel:
+                      Consortium: AWSSystemConsortium
+                      Application:
+                          <<: *ApplicationDefaults
+                          Organizations:
+                              - *Org1
+              ' > /home/ec2-user/configtx.yaml
+              docker exec cli configtxgen -outputCreateChannelTx /opt/home/mychannel.pb -profile OneOrgChannel -channelID mychannel --configPath /opt/home/
+              sleep 30s
+              # Create Channel
+              docker exec cli peer channel create -c mychannel -f /opt/home/mychannel.pb -o ${ORDERING_SERVICE_ENDPOINT} --cafile /opt/home/${FABRIC_CA_FILE} --tls
+              sleep 30s
+              docker exec cli peer channel join -b mychannel.block -o ${ORDERING_SERVICE_ENDPOINT} --cafile /opt/home/${FABRIC_CA_FILE} --tls
+              sleep 30s
+              # Install ChainCode
+              docker exec cli peer chaincode install -n mycc -v v0 -p github.com/chaincode_example02/go
+              docker exec cli peer chaincode instantiate -o ${ORDERING_SERVICE_ENDPOINT} -C mychannel -n mycc -v v0 -c '{"Args":["init","a","100","b","200"]}' --cafile /opt/home/${FABRIC_CA_FILE} --tls
+              sleep 30s
+              docker exec cli peer chaincode list --instantiated -o ${ORDERING_SERVICE_ENDPOINT} -C mychannel --cafile /opt/home/${FABRIC_CA_FILE} --tls
+              /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BlockchainClient --region ${AWS::Region}
+            - {
+                DOCKER_COMPOSE_VERSION: !FindInMap [FrameworkVersionToPackageVersion, !Ref "FrameworkVersion", DOCKERCOMPOSE],
+                GO_VERSION: !FindInMap [FrameworkVersionToPackageVersion, !Ref "FrameworkVersion", GO],
+                FABRIC_CA_VERSION: !FindInMap [FrameworkVersionToPackageVersion, !Ref "FrameworkVersion", FABRICCA],
+                TLS_CERT_URL: !FindInMap [AWSRegionToCertificateUrl, !Ref "AWS::Region", TLS],
+                FABRIC_TOOLS_VERSION: !FindInMap [FrameworkVersionToPackageVersion, !Ref "FrameworkVersion", FABRICTOOLS],
+                MEMBER_ID: !GetAtt BlockchainMember.Member.Id,
+                PEER_NODE_ENDPOINT: !GetAtt BlockchainPeerNode.Node.FrameworkAttributes.Fabric.PeerEndpoint,
+                ORDERING_SERVICE_ENDPOINT: !GetAtt BlockchainNetwork.Network.FrameworkAttributes.Fabric.OrderingServiceEndpoint,
+                FABRIC_CA_ENDPOINT: !GetAtt BlockchainMember.Member.FrameworkAttributes.Fabric.CaEndpoint,
+                FABRIC_CA_FILE: managedblockchain-tls-chain.pem,
+                ADMIN_USERNAME: !Ref AdminUsername,
+                ADMIN_PASSWORD: !Ref AdminPassword
+            }
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT20M
+    DependsOn: BlockchainEndpoint
+
+  CreateBlockchainNetworkFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt BlockchainFunctionExecutionRole.Arn
+      Code:
+        ZipFile: !Sub |
+          import cfnresponse
+          import boto3
+          def handler(event, context):
+            print('boto3: ' + boto3.__version__)
+            client = boto3.client("managedblockchain")
+            print(event)
+
+            if event['RequestType'] == 'Create':
+              print('create network')
+              networkName = event['ResourceProperties']['NetworkName']
+              networkDescription = event['ResourceProperties']['NetworkDescription']
+              networkFramework = event['ResourceProperties']['NetworkFramework']
+              frameworkVersion = event['ResourceProperties']['FrameworkVersion']
+              networkEdition = event['ResourceProperties']['NetworkEdition']
+              adminUsername = event['ResourceProperties']['AdminUsername']
+              adminPassword = event['ResourceProperties']['AdminPassword']
+              orgName = event['ResourceProperties']['OrgName']
+              thresholdPercentage = int(event['ResourceProperties']['ThresholdPercentage'])
+              proposalDurationInHours = int(event['ResourceProperties']['ProposalDurationInHours'])
+              thresholdComparator = event['ResourceProperties']['ThresholdComparator']
+
+              response = {}
+              try:
+                response = client.create_network(
+                  Name=networkName,
+                  Description=networkDescription,
+                  Framework=networkFramework,
+                  FrameworkVersion=frameworkVersion,
+                  FrameworkConfiguration={
+                    "Fabric": {
+                      "Edition": networkEdition
+
+                    }
+                  },
+                  VotingPolicy={
+                    "ApprovalThresholdPolicy": {
+                      "ThresholdPercentage": thresholdPercentage,
+                      "ProposalDurationInHours": proposalDurationInHours,
+                      "ThresholdComparator": thresholdComparator
+                    }
+                  },
+                  MemberConfiguration={
+                    "Name": orgName,
+                    "Description": "first member of network",
+                    "FrameworkConfiguration": {
+                      "Fabric": {
+                        "AdminUsername": adminUsername,
+                        "AdminPassword": adminPassword
+                      }
+                    }
+                  }
+                )
+              except Exception as e:
+                print("error: " + str(e))
+                response = {'error': str(e)}
+                cfnresponse.send(event, context, cfnresponse.FAILED, response)
+                return
+
+              print(response)
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, response)
+              return
+
+            if event['RequestType'] == 'Update':
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              return
+
+            if event['RequestType'] == 'Delete':
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              return
+      Runtime: python3.7
+      Timeout: 60
+      Layers:
+        - !Ref Boto3LambdaLayerArn
+
+  BlockchainNetworkFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt BlockchainFunctionExecutionRole.Arn
+      Code:
+        ZipFile: !Sub |
+          import cfnresponse
+          import boto3
+          import time
+          import json
+          from datetime import date, datetime
+          def json_serial(obj):
+            if isinstance(obj, (datetime, date)):
+              return obj.isoformat()
+            raise TypeError ('Type %s not serializable' % type(obj))
+
+          def handler(event, context):
+            print('boto3: ' + boto3.__version__)
+            client = boto3.client("managedblockchain")
+            print(event)
+            networkId = event['ResourceProperties']['NetworkId']
+            response = {}
+            if event['RequestType'] == 'Create':
+              while True:
+                network = client.get_network(
+                  NetworkId=networkId
+                )
+                if network['Network']['Status'] == 'AVAILABLE':
+                  break
+                print('status: ' + network['Network']['Status'])
+                print('network create wait...')
+                time.sleep(60)
+
+              print('wait done')
+              network = json.loads(json.dumps(network, default=json_serial))
+              networkId = network['Network']['Id']
+              orderingServiceEndpoint = network['Network']['FrameworkAttributes']['Fabric']['OrderingServiceEndpoint']
+              vpcEndpointServiceName =  network['Network']['VpcEndpointServiceName']
+              response = {
+                "Network.Id": networkId,
+                "Network.FrameworkAttributes.Fabric.OrderingServiceEndpoint": orderingServiceEndpoint,
+                "Network.VpcEndpointServiceName": vpcEndpointServiceName
+              }
+
+            cfnresponse.send(event, context, cfnresponse.SUCCESS, response)
+      Runtime: python3.7
+      Timeout: 900
+      Layers:
+        - !Ref Boto3LambdaLayerArn
+
+  BlockchainMemberFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt BlockchainFunctionExecutionRole.Arn
+      Code:
+        ZipFile: !Sub |
+          import cfnresponse
+          import boto3
+          import time
+          import json
+          from datetime import date, datetime
+          def json_serial(obj):
+            if isinstance(obj, (datetime, date)):
+              return obj.isoformat()
+            raise TypeError ('Type %s not serializable' % type(obj))
+
+          def handler(event, context):
+            print('boto3: ' + boto3.__version__)
+            client = boto3.client('managedblockchain')
+            print(event)
+            networkId = event['ResourceProperties']['NetworkId']
+            memberId = event['ResourceProperties']['MemberId']
+
+            if event['RequestType'] == 'Create':
+              response = {}
+              while True:
+                response = client.get_member(
+                  NetworkId=networkId,
+                  MemberId=memberId
+                )
+                if response['Member']['Status'] == 'AVAILABLE':
+                  break
+                print('status: ' + response['Member']['Status'])
+                print('member create wait...')
+                time.sleep(60)
+
+              print('wait done')
+              response = json.loads(json.dumps(response, default=json_serial))
+              memberId = response['Member']['Id']
+              caEndpoint = response['Member']['FrameworkAttributes']['Fabric']['CaEndpoint']
+              data = {
+                "Member.Id": memberId,
+                "Member.FrameworkAttributes.Fabric.CaEndpoint": caEndpoint
+              }
+
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, data)
+              return
+
+            if event['RequestType'] == 'Update':
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              return
+
+            if event['RequestType'] == 'Delete':
+              print('delete member')
+              response = {}
+              try:
+                response = client.delete_member(
+                  NetworkId=networkId,
+                  MemberId=memberId
+                )
+              except Exception as e:
+                print('error: ' + str(e))
+                response = {'error': str(e)}
+                cfnresponse.send(event, context, cfnresponse.FAILED, response)
+                return
+
+              print(response)
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, response)
+              return
+      Runtime: python3.7
+      Timeout: 900
+      Layers:
+        - !Ref Boto3LambdaLayerArn
+
+  CreateBlockchainPeerNodeFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt BlockchainFunctionExecutionRole.Arn
+      Code:
+        ZipFile: !Sub |
+          import cfnresponse
+          import boto3
+          def handler(event, context):
+            print('boto3: ' + boto3.__version__)
+            client = boto3.client("managedblockchain")
+            print(event)
+
+            if event['RequestType'] == 'Create':
+              print('create peer node')
+              networkId = event['ResourceProperties']['NetworkId']
+              memberId = event['ResourceProperties']['MemberId']
+              instanceType = event['ResourceProperties']['InstanceType']
+              availabilityZone = event['ResourceProperties']['AvailabilityZone']
+
+              response = {}
+              try:
+                response = client.create_node(
+                  NetworkId=networkId,
+                  MemberId=memberId,
+                  NodeConfiguration={
+                    'InstanceType': instanceType,
+                    'AvailabilityZone': availabilityZone
+                  }
+                )
+              except Exception as e:
+                print("error: " + str(e))
+                response = {'error': str(e)}
+                cfnresponse.send(event, context, cfnresponse.FAILED, response)
+                return
+
+              print(response)
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, response)
+              return
+
+            if event['RequestType'] == 'Update':
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              return
+
+            if event['RequestType'] == 'Delete':
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              return
+      Runtime: python3.7
+      Timeout: 900
+      Layers:
+        - !Ref Boto3LambdaLayerArn
+
+  BlockchainPeerNodeFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt BlockchainFunctionExecutionRole.Arn
+      Code:
+        ZipFile: !Sub |
+          import cfnresponse
+          import boto3
+          import time
+          import json
+          from datetime import date, datetime
+          def json_serial(obj):
+            if isinstance(obj, (datetime, date)):
+              return obj.isoformat()
+            raise TypeError ('Type %s not serializable' % type(obj))
+
+          def handler(event, context):
+            print('boto3: ' + boto3.__version__)
+            client = boto3.client("managedblockchain")
+            print(event)
+            networkId = event['ResourceProperties']['NetworkId']
+            memberId = event['ResourceProperties']['MemberId']
+            nodeId = event['ResourceProperties']['NodeId']
+
+            if event['RequestType'] == 'Create':
+              while True:
+                response = client.get_node(
+                  NetworkId=networkId,
+                  MemberId=memberId,
+                  NodeId=nodeId
+                )
+                if response['Node']['Status'] == 'AVAILABLE':
+                  break
+                print('status: ' + response['Node']['Status'])
+                print('peer node create wait...')
+                time.sleep(60)
+
+              print('wait done')
+              response = json.loads(json.dumps(response, default=json_serial))
+              nodeId = response['Node']['Id']
+              peerEndpoint = response['Node']['FrameworkAttributes']['Fabric']['PeerEndpoint']
+              data = {
+                "Node.Id": nodeId,
+                "Node.FrameworkAttributes.Fabric.PeerEndpoint": peerEndpoint
+              }
+
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, data)
+              return
+
+            if event['RequestType'] == 'Update':
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              return
+
+            if event['RequestType'] == 'Delete':
+              print('delete peer node')
+              response = {}
+              try:
+                response = client.delete_node(
+                  NetworkId=networkId,
+                  MemberId=memberId,
+                  NodeId=nodeId
+                )
+              except Exception as e:
+                print("error: " + str(e))
+                response = {'error': str(e)}
+                cfnresponse.send(event, context, cfnresponse.FAILED, response)
+                return
+              print(response)
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, response)
+              return
+      Runtime: python3.7
+      Timeout: 900
+      Layers:
+        - !Ref Boto3LambdaLayerArn
+
+  BlockchainFunctionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: root
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: "arn:aws:logs:*:*:*"
+          - Effect: Allow
+            Action:
+              - managedblockchain:*
+            Resource: "*"
+
+Outputs:
+  NetworkId:
+    Value: !GetAtt BlockchainNetwork.Network.Id
+  MemberId:
+    Value: !GetAtt BlockchainMember.Member.Id
+  PeerNodeId:
+    Value: !GetAtt BlockchainPeerNode.Node.Id
+  ClientInstanceId:
+    Value: !Ref BlockchainClient
+  ClientPublicIp:
+    Value: !GetAtt BlockchainClient.PublicIp
