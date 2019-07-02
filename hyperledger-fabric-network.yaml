@@ -250,13 +250,6 @@ Resources:
         - !Ref SubnetId
       SecurityGroupIds:
         - !GetAtt BlockchainNetworkSecurityGroup.GroupId
-      Tags:
-        -
-          Key: "Name"
-          Value: !Join
-            - "-"
-            - - !Ref NetworkName
-              - "VPCEndpoint"
     DependsOn: BlockchainNetworkSecurityGroup
 
   # https://github.com/awslabs/amazon-managed-blockchain-client-templates/blob/master/templates/fabric-ec2-client.template.yaml#L2
